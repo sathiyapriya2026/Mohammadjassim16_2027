@@ -1,34 +1,51 @@
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
-import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+import java.io.*;
+import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Scanner;
-import java.security.SecureRandom;
+import java.util.Arrays;
 
 public class SecurePasswordManager {
-
     private static HashMap<String, String> passwordStore = new HashMap<>();
     private static SecretKey secretKey;
+    private static final String KEY_FILE =
+            System.getProperty("user.home") + File.separator + "secret.key";
 
-    private static final String MASTER_PASSWORD = "admin123";
-    private static final int MAX_ATTEMPTS = 3;
+    private static final int GCM_TAG_LENGTH = 128;
+    private static final int IV_LENGTH = 12;
+    private static void loadOrGenerateKey() throws Exception {
+        File file = new File(KEY_FILE);
 
-    private static void generateKey() throws Exception {
-        KeyGenerator keyGen = KeyGenerator.getInstance("AES");
-        keyGen.init(128);
-        secretKey = keyGen.generateKey();
+        if (file.exists()) {
+            byte[] keyBytes = new byte[(int) file.length()];
+            try (FileInputStream fis = new FileInputStream(file)) {
+                fis.read(keyBytes);
+            }
+            secretKey = new SecretKeySpec(keyBytes, "AES");
+        } else {
+            KeyGenerator keyGen = KeyGenerator.getInstance("AES");
+            keyGen.init(128);
+            secretKey = keyGen.generateKey();
+
+            try (FileOutputStream fos = new FileOutputStream(file)) {
+                fos.write(secretKey.getEncoded());
+            }
+        }
     }
-
     private static String encrypt(String password) throws Exception {
-        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+        byte[] iv = new byte[IV_LENGTH];
+        SecureRandom random = new SecureRandom();
+        random.nextBytes(iv);
 
-        byte[] iv = new byte[16];
-        new SecureRandom().nextBytes(iv);
-        IvParameterSpec ivSpec = new IvParameterSpec(iv);
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        GCMParameterSpec spec = new GCMParameterSpec(GCM_TAG_LENGTH, iv);
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey, spec);
 
-        cipher.init(Cipher.ENCRYPT_MODE, secretKey, ivSpec);
         byte[] encrypted = cipher.doFinal(password.getBytes());
 
         byte[] combined = new byte[iv.length + encrypted.length];
@@ -37,50 +54,24 @@ public class SecurePasswordManager {
 
         return Base64.getEncoder().encodeToString(combined);
     }
-
     private static String decrypt(String encryptedPassword) throws Exception {
-        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-
         byte[] combined = Base64.getDecoder().decode(encryptedPassword);
 
-        byte[] iv = new byte[16];
-        byte[] encrypted = new byte[combined.length - 16];
+        byte[] iv = Arrays.copyOfRange(combined, 0, IV_LENGTH);
+        byte[] ciphertext = Arrays.copyOfRange(combined, IV_LENGTH, combined.length);
 
-        System.arraycopy(combined, 0, iv, 0, 16);
-        System.arraycopy(combined, 16, encrypted, 0, encrypted.length);
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        GCMParameterSpec spec = new GCMParameterSpec(GCM_TAG_LENGTH, iv);
+        cipher.init(Cipher.DECRYPT_MODE, secretKey, spec);
 
-        IvParameterSpec ivSpec = new IvParameterSpec(iv);
-        cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec);
-
-        byte[] decrypted = cipher.doFinal(encrypted);
+        byte[] decrypted = cipher.doFinal(ciphertext);
         return new String(decrypted);
     }
 
     public static void main(String[] args) throws Exception {
         Scanner sc = new Scanner(System.in);
-        generateKey();
-
-        int attempts = 0;
-        boolean authenticated = false;
-
-        while (attempts < MAX_ATTEMPTS) {
-            System.out.print("Enter master password: ");
-            String input = sc.nextLine();
-
-            if (input.equals(MASTER_PASSWORD)) {
-                authenticated = true;
-                break;
-            } else {
-                attempts++;
-                System.out.println("Wrong password! Attempts left: " + (MAX_ATTEMPTS - attempts));
-            }
-        }
-
-        if (!authenticated) {
-            System.out.println("Too many failed attempts. Exiting...");
-            return;
-        }
-
+        System.out.println("Key file path: " + KEY_FILE); 
+        loadOrGenerateKey();
         while (true) {
             System.out.println("\n=== Password Manager ===");
             System.out.println("1. Add Account");
@@ -94,11 +85,18 @@ public class SecurePasswordManager {
             if (choice == 1) {
                 System.out.print("Enter account name: ");
                 String account = sc.nextLine();
-                System.out.print("Enter password: ");
-                String password = sc.nextLine();
 
-                String encrypted = encrypt(password);
+                if (passwordStore.containsKey(account)) {
+                    System.out.println("Account already exists!");
+                    continue;
+                }
+
+                System.out.print("Enter password: ");
+                char[] passwordChars = sc.nextLine().toCharArray();
+
+                String encrypted = encrypt(new String(passwordChars));
                 passwordStore.put(account, encrypted);
+                Arrays.fill(passwordChars, '\0'); 
                 System.out.println("Account added successfully!");
 
             } else if (choice == 2) {
@@ -108,6 +106,7 @@ public class SecurePasswordManager {
                 if (passwordStore.containsKey(account)) {
                     String decrypted = decrypt(passwordStore.get(account));
                     System.out.println("Password: " + decrypted);
+                    decrypted = null; 
                 } else {
                     System.out.println("Account not found!");
                 }
